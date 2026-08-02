@@ -258,8 +258,8 @@
     <div class="slide-number">01 / 13</div>
   </div>
   <div class="slide-body">
-    <p style="color: var(--accent-primary); font-weight: 700; margin-bottom: 8px; letter-spacing: 1px;">私の一番HOTな推し × M5Stack AtomS3</p>
-    <h1>愛しのニシアフのために<br>スマートケージを作った話</h1>
+    <p style="color: var(--accent-primary); font-weight: 700; margin-bottom: 8px; letter-spacing: 1px;">私の一番HOTな推し × M5Stack ATOMS3</p>
+    <h1>ニシアフのために<br>スマートケージを作った話</h1>
     <div class="subtitle" style="margin-top: 16px;">BLEを活用した24時間完全自動の飼育環境制御</div>
   </div>
 </div>
@@ -362,32 +362,33 @@
   </div>
 </div>
 
-<!-- Slide 5: システム構成 -->
+<!-- Slide 5: システム構成（ATOMS3画像追加） -->
 <div class="slide">
   <div class="slide-header">
     <div class="slide-title">使用機器とそれぞれの役割</div>
     <div class="slide-number">05 / 13</div>
   </div>
   <div class="slide-body">
-    <div class="cols-2">
+    <div class="cols-2" style="grid-template-columns: 1.4fr 1fr; gap: 32px; align-items: center;">
       <div>
         <ul class="clean-list">
           <li>
-            <strong>M5Stack AtomS3</strong><br>
+            <strong>M5Stack ATOMS3</strong><br>
             Wi-Fiは使わずBLEのみで通信。本体ボタンは一切押さず完全に自動で回す。
           </li>
           <li>
             <strong>防水温湿度計</strong><br>
             パッシブスキャンで温湿度を取得。常時接続しないため安定して動作する。
           </li>
+          <li>
+            <strong>電源制御（SwitchBot プラグミニ）</strong><br>
+            UVBライト、パネルヒーター、ミストシステムの電源を個別に自動制御する。
+          </li>
         </ul>
       </div>
-      <div>
-        <ul class="clean-list">
-          <li><strong>UVBライト用プラグ</strong> 12時間ごとのタイマー制御</li>
-          <li><strong>パネルヒーター用プラグ</strong> 温度に応じた電源オンオフ</li>
-          <li><strong>ミストシステム用プラグ</strong> 湿度に応じた自動噴射制御</li>
-        </ul>
+      <div style="text-align: center;">
+        <img src="https://raw.githubusercontent.com/nagutabby/atoms3-reptile-cage/main/images/atoms3.webp" alt="M5Stack ATOMS3" style="width: 220px; height: 220px; object-fit: cover; border-radius: 8px; border: 1px solid var(--line-color); aspect-ratio: 1 / 1;">
+        <p style="font-size: 12px; color: var(--text-sub); margin-top: 8px;">引用元 https://docs.m5stack.com/ja/core/AtomS3</p>
       </div>
     </div>
   </div>
@@ -401,7 +402,7 @@
   </div>
   <div class="slide-body">
     <p style="margin-bottom: 24px; font-size: 17px;">
-      AtomS3内部で3つの処理が独立して並行動作する。互いの処理完了を待たずに各自の周期でループする。
+      M5Stack ATOMS3内部で3つの処理が独立して並行動作する。互いの処理完了を待たずに各自の周期でループする。
     </p>
     <div class="cols-3">
       <div>
@@ -484,30 +485,38 @@
   </div>
 </div>
 
-<!-- Slide 9: 湿度制御 -->
+<!-- Slide 9: 湿度制御（給水用ボトル画像追加） -->
 <div class="slide">
   <div class="slide-header">
     <div class="slide-title">湿度制御 噴射とクールダウン</div>
     <div class="slide-number">09 / 13</div>
   </div>
   <div class="slide-body">
-    <ul class="clean-list">
-      <li>
-        <strong>トリガー条件</strong><br>
-        湿度が <span class="highlight-val">55パーセント未満</span> かつ 前回の噴射から <span class="highlight-val">2時間以上</span> 経過していること。
-      </li>
-      <li>
-        <strong>15秒の自動実行シーケンス</strong><br>
-        電源オン → 5秒待機 → 10秒自動噴射 → 電源オフ。
-      </li>
-      <li>
-        <strong>過湿防止のクールダウン</strong><br>
-        噴射後は値が安定しないため、最短でも2時間は次の噴射を行わない。
-      </li>
-    </ul>
-    <p style="font-size: 14px; color: var(--text-sub); margin-top: 12px;">
-      使用するミスト装置は電源オン後最大10秒で自動停止する仕様のため、万一オフコマンドが失敗しても水浸しにならない。
-    </p>
+    <div class="cols-2" style="grid-template-columns: 1.3fr 1fr; gap: 32px; align-items: center;">
+      <div>
+        <ul class="clean-list">
+          <li>
+            <strong>トリガー条件</strong><br>
+            湿度が <span class="highlight-val">55パーセント未満</span> かつ 前回の噴射から <span class="highlight-val">2時間以上</span> 経過していること。
+          </li>
+          <li>
+            <strong>15秒の自動実行シーケンス</strong><br>
+            電源オン → 5秒待機 → 10秒自動噴射 → 電源オフ。
+          </li>
+          <li>
+            <strong>過湿防止のクールダウン</strong><br>
+            噴射後は値が安定しないため、最短でも2時間は次の噴射を行わない。
+          </li>
+        </ul>
+        <p style="font-size: 13px; color: var(--text-sub); margin-top: 8px;">
+          使用するミスト装置は電源オン後最大10秒で自動停止する仕様のため、万一オフコマンドが失敗しても水浸しにならない。
+        </p>
+      </div>
+      <div style="text-align: center;">
+        <img src="https://raw.githubusercontent.com/nagutabby/atoms3-reptile-cage/main/images/bottle_with_hole.jpg" alt="給水用ボトル" style="width: 190px; height: 270px; object-fit: cover; border-radius: 8px; border: 1px solid var(--line-color);">
+        <p style="font-size: 13px; color: var(--text-body); margin-top: 8px;">はんだごてで蓋の中央にチューブを通すための穴を開けた給水用ボトル</p>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -552,14 +561,14 @@ void applyHeaterControl(float tempC) {
     }
 }
 
-// 5分周期の定期判定と不応答時の安全停止
+// 5分周期の定期判定と不応答時の安全加熱処理
 void checkTempHumidity(uint32_t now) {
     if (SwitchBotBLE::meterScanRead(METER_MAC, tempC, humidity)) {
         applyHeaterControl(tempC);
     }
-    // 30分以上センサー不応答ならヒーターを強制OFF
-    if (haveTempReading && heaterIsOn && (millis() - lastSensorReadMs) >= SENSOR_STALE_MS) {
-        if (SwitchBotBLE::plugTurnOff(PLUG_HEATER_MAC)) heaterIsOn = false;
+    // 30分以上センサー不応答なら過度な冷え込み防止のためヒーターを強制ON
+    if (haveTempReading && !heaterIsOn && (millis() - lastSensorReadMs) >= SENSOR_STALE_MS) {
+        if (SwitchBotBLE::plugTurnOn(PLUG_HEATER_MAC)) heaterIsOn = true;
     }
 }</div>
   </div>
@@ -576,7 +585,7 @@ void checkTempHumidity(uint32_t now) {
       <div>
         <div class="section-label">センサー応答なし</div>
         <p class="section-desc">
-          30分以上温湿度データが更新されない場合、安全を最優先して<span class="highlight-val">ヒーターをオフ</span>に固定する。
+          30分以上温湿度データが更新されない場合、冷え込み防止を最優先して<span class="highlight-val">ヒーターをオン</span>に固定する。
         </p>
       </div>
       <div>
@@ -587,7 +596,7 @@ void checkTempHumidity(uint32_t now) {
       </div>
     </div>
     <div class="message-block" style="margin-top: 32px;">
-      温度が測定できない状態での加熱継続を防止。センサー不調時でもライトのタイマー制御は継続する。
+      温度が測定できない状態での危険な温度低下を防止。センサー不調時でもライトのタイマー制御は継続する。
     </div>
   </div>
 </div>
@@ -612,7 +621,7 @@ void checkTempHumidity(uint32_t now) {
         <div class="section-label">今後の課題</div>
         <ul class="clean-list">
           <li>時計モジュール追加による現実時刻との同期</li>
-          <li>AtomS3の画面へのステータス表示の実装</li>
+          <li>M5Stack ATOMS3の画面へのステータス表示の実装</li>
           <li>実機での長期連続稼働とパラメータ微調整</li>
         </ul>
       </div>
