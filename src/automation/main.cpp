@@ -105,8 +105,14 @@ static const uint32_t SENSOR_STALE_MS                 = 30UL * 60 * 1000;     //
 
 namespace {
 
+// 画面下端まで描画済みなら、新しい行を書く前に画面をクリアして先頭に戻す。
+// (パネルのハードウェアスクロールは一部端末で描画崩れが出るため使わない)
 void logLine(const String& msg) {
     Serial.println(msg);
+    if (M5.Display.getCursorY() + M5.Display.fontHeight() > M5.Display.height()) {
+        M5.Display.clear();
+        M5.Display.setCursor(0, 0);
+    }
     M5.Display.println(msg);
 }
 
@@ -540,7 +546,6 @@ void setup() {
     M5.Display.setRotation(1);
     M5.Display.setTextSize(1);
     M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
-    M5.Display.setTextScroll(true); // 画面下端に達したら自動スクロールする(画面外への描画を防ぐ)
 
     Serial.begin(115200);
     delay(1000);
