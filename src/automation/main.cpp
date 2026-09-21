@@ -4,10 +4,17 @@
 // M5Stack AtomS3 から以下を自律制御する:
 //   - SwitchBot プラグミニ (UVBライト用, BLE): 実時刻(JST)に基づき
 //     7:00-18:59 ON / 19:00-6:59 OFF を切り替える (タイマー制御)
-//   - Wi-Fi + NTP: 実時刻取得のため1時間ごとに接続->同期->切断する
-//     (BLEとの無線干渉を避けるため、同期時以外はWi-Fiを完全にOFFにする)
+//   - SwitchBot 防水温湿度計 (BLEパッシブスキャン): 1分おきに温湿度を取得し、
+//     取得できたら都度Wi-Fi経由でFastAPIバックエンドに送信する
+//     (本体内のデータ記録自体が1分単位のため、この間隔に合わせている)
+//   - Wi-Fi + NTP: 起動時に接続し、以後は切断せず常時接続を維持する
+//     (切断が続いた場合は指数バックオフで再接続を試みる)。実時刻は1時間
+//     ごとに再同期する
 //
-// ヒーター・ミストシステム・温湿度計の制御コードはライトのみ制御への切替に伴い
+// Wi-Fiを常時接続にしているため、BLE(プラグ制御・温湿度計スキャン)とは
+// 常に無線を共有する。干渉でBLE側が不安定になる場合は接続維持方式を見直すこと。
+//
+// ヒーター・ミストシステムの制御コードはライトのみ制御への切替に伴い
 // 無効化 (#if 0) して残している。将来再度有効化する場合はその節を参照。
 //
 // 起動後、処理開始前に必ずNTP時刻同期とUVBプラグへの疎通確認(+リトライ)を行い、
@@ -17,18 +24,20 @@
 #include <M5Unified.h>
 #include <NimBLEDevice.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
 #include <time.h>
 #include "switchbot_ble.h"
-#include "wifi_config.h" // WIFI_SSID, WIFI_PASSWORD (.gitignore対象。wifi_config.h.exampleを参照)
+#include "wifi_config.h" // WIFI_SSID, WIFI_PASSWORD, API_ENDPOINT_URL, API_KEY (.gitignore対象。wifi_config.h.exampleを参照)
 
 // =========================================================================
 // 1. 各機器のMACアドレス設定 (小文字・コロン区切り)
 // =========================================================================
 const char* PLUG_UVB_MAC    = "70:af:09:17:2a:d2"; // UVBライト用プラグ
+const char* METER_MAC       = "eb:6b:03:06:2f:57"; // 防水温湿度計
 
 #if 0
 // ライトのみ制御への切替に伴い無効化。復活させる場合はこの節を有効化する。
-const char* METER_MAC       = "eb:6b:03:06:2f:57"; // 防水温湿度計
 const char* PLUG_HEATER_MAC = "ac:27:6e:40:5a:a2"; // パネルヒーター用プラグ
 const char* PLUG_MIST_MAC   = "00:00:00:00:00:00"; // TODO: ミストシステム用プラグミニ。実機到着後に実際のMACアドレスに置き換える
 #endif
@@ -49,6 +58,9 @@ static const uint32_t NTP_RESYNC_INTERVAL_MS            = 60UL * 60 * 1000;     
 static const uint32_t NTP_RETRY_BASE_MS                 = 5UL * 60 * 1000;      // NTP同期失敗時の再試行間隔(指数バックオフの初期値): 5分
 static const uint32_t NTP_RETRY_MAX_MS                  = 30UL * 60 * 1000;     // NTP同期失敗時の再試行間隔の上限: 30分
 
+static const uint32_t WIFI_RETRY_BASE_MS                = 30UL * 1000;          // Wi-Fi切断検知時の再接続間隔(指数バックオフの初期値): 30秒
+static const uint32_t WIFI_RETRY_MAX_MS                 = 10UL * 60 * 1000;     // Wi-Fi再接続間隔の上限: 10分
+
 static const int      LIGHT_ON_HOUR                     = 7;  // ONにする時刻(この時刻を含む): 7:00
 static const int      LIGHT_OFF_HOUR                    = 19; // OFFにする時刻(この時刻を含む): 19:00
 static const uint32_t LIGHT_SCHEDULE_CHECK_INTERVAL_MS  = 60UL * 1000;          // スケジュール判定間隔: 1分
@@ -62,9 +74,15 @@ static const uint8_t  STARTUP_CHECK_ROUNDS              = 3;
 static const uint32_t STARTUP_CHECK_RETRY_DELAY_MS      = 3000;      // ラウンド間待機(指数バックオフの初期値)
 static const uint32_t STARTUP_CHECK_RETRY_MAX_DELAY_MS  = 15000;     // ラウンド間待機の上限
 
+// ---- 温湿度計測・レポート送信 ----
+// 計測(BLE)・送信(Wi-Fi)とも1分おき(温湿度計本体のデータ記録間隔に合わせる)。
+// 取得できたら都度送信する(バッファしない)。
+static const uint32_t TEMP_HUMIDITY_CHECK_INTERVAL_MS  = 1UL * 60 * 1000;     // 温湿度チェック間隔: 1分
+static const uint32_t METER_RETRY_BASE_MS              = 60UL * 1000;         // スキャン/送信失敗時の再試行間隔(指数バックオフの初期値): 1分
+static const uint32_t METER_RETRY_MAX_MS               = 15UL * 60 * 1000;    // 再試行間隔の上限: 15分
+
 #if 0
 // ライトのみ制御への切替に伴い無効化。復活させる場合はこの節を有効化する。
-static const uint32_t TEMP_HUMIDITY_CHECK_INTERVAL_MS = 5UL * 60 * 1000;      // 温湿度チェック間隔: 5分
 static const float    HEATER_OFF_TEMP_C               = 32.0f;                // ヒーターOFFしきい値
 static const float    HEATER_ON_TEMP_C                = 28.0f;                // ヒーターONしきい値
 
@@ -99,6 +117,11 @@ uint32_t nextLightCheckMs = 0;
 bool timeSynced = false;
 uint8_t ntpFailureCount = 0;
 uint8_t lightRetryFailureCount = 0;
+uint32_t nextSensorCheckMs = 0;
+uint8_t meterFailureCount = 0;
+bool wifiConnected = false;
+uint8_t wifiFailureCount = 0;
+uint32_t nextWifiRetryMs = 0;
 
 #if 0
 // ライトのみ制御への切替に伴い無効化。復活させる場合はこの節を有効化する。
@@ -108,7 +131,6 @@ bool haveTempReading = false;
 float lastTempC = 0.0f;
 uint8_t lastHumidity = 0;
 uint32_t lastSensorReadMs = 0;
-uint32_t nextSensorCheckMs = 0;
 
 bool haveMisted = false;
 uint32_t lastMistMs = 0;
@@ -123,9 +145,8 @@ bool mistIsOn = false;
 // 3. Wi-Fi + NTP 時刻同期
 // =========================================================================
 
-// Wi-Fi接続->NTP同期->切断を1回試行する。成否に関わらず必ずWi-Fiを完全にOFFにして
-// 戻る(同期時以外はBLEと無線を共有しないようにするため)。
-bool wifiConnectAndSyncNtp() {
+// Wi-Fi接続を1回試行する。常時接続を維持する方針のため、呼び出し側で切断は行わない。
+bool wifiConnect() {
     WiFi.mode(WIFI_STA);
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
@@ -133,29 +154,38 @@ bool wifiConnectAndSyncNtp() {
     while (WiFi.status() != WL_CONNECTED && (millis() - start) < WIFI_CONNECT_TIMEOUT_MS) {
         delay(200);
     }
+    return WiFi.status() == WL_CONNECTED;
+}
+
+// 温湿度計測値をFastAPIバックエンドにレポート送信する(Wi-Fi接続済みであることが前提)。
+// 証明書検証は setInsecure() で省略している(組み込み機器でのCA証明書管理コストを
+// 避ける簡易実装。ホビー用途として許容し、MITMリスクは認識のうえ受容する)。
+bool sendMeterReadingHttp(float tempC, uint8_t humidity) {
+    WiFiClientSecure client;
+    client.setInsecure();
+    HTTPClient http;
 
     bool ok = false;
-    if (WiFi.status() == WL_CONNECTED) {
-        configTime(JST_OFFSET_SEC, JST_DST_OFFSET_SEC, NTP_SERVER1, NTP_SERVER2);
-        struct tm timeinfo;
-        ok = getLocalTime(&timeinfo, NTP_SYNC_TIMEOUT_MS);
+    if (http.begin(client, API_ENDPOINT_URL)) {
+        http.addHeader("Content-Type", "application/json");
+        http.addHeader("X-API-Key", API_KEY);
+        String body = String("{\"temp_c\":") + String(tempC, 1) + ",\"humidity\":" + String(humidity) + "}";
+        int code = http.POST(body);
+        ok = (code >= 200 && code < 300);
+        logLine(ok ? "[Report] sent OK" : ("[Report] FAILED (HTTP " + String(code) + ")"));
+        http.end();
     } else {
-        logLine("[NTP] Wi-Fi connect FAILED");
+        logLine("[Report] http.begin FAILED");
     }
-
-    WiFi.disconnect(true);
-    WiFi.mode(WIFI_OFF);
-
-    logLine(ok ? "[NTP] sync OK" : "[NTP] sync FAILED");
     return ok;
 }
 
-// 起動時用: STARTUP_CHECK_ROUNDS回まで粘って時刻同期を試みる。ラウンド間の待機は
+// 起動時用: STARTUP_CHECK_ROUNDS回まで粘ってWi-Fi接続を試みる。ラウンド間の待機は
 // 指数バックオフで増やす。
-bool syncTimeWithRetry() {
+bool connectWifiWithRetry() {
     for (uint8_t round = 1; round <= STARTUP_CHECK_ROUNDS; round++) {
-        if (wifiConnectAndSyncNtp()) return true;
-        logLine("[NTP] startup sync " + String(round) + "/" + String(STARTUP_CHECK_ROUNDS) + " failed");
+        if (wifiConnect()) return true;
+        logLine("[WiFi] startup connect " + String(round) + "/" + String(STARTUP_CHECK_ROUNDS) + " failed");
         if (round < STARTUP_CHECK_ROUNDS) {
             delay(backoffDelayMs(STARTUP_CHECK_RETRY_DELAY_MS, round - 1, STARTUP_CHECK_RETRY_MAX_DELAY_MS));
         }
@@ -163,10 +193,49 @@ bool syncTimeWithRetry() {
     return false;
 }
 
+// Wi-Fiが切断されていたら再接続を試みる(常時接続を維持する)。失敗時は指数バックオフ
+// で再試行間隔を空ける。
+void ensureWifiConnected(uint32_t now) {
+    if (WiFi.status() == WL_CONNECTED) {
+        wifiConnected = true;
+        wifiFailureCount = 0;
+        return;
+    }
+
+    wifiConnected = false;
+    if ((int32_t)(now - nextWifiRetryMs) < 0) return;
+
+    if (wifiConnect()) {
+        wifiConnected = true;
+        wifiFailureCount = 0;
+        logLine("[WiFi] reconnected");
+    } else {
+        uint32_t delayMs = backoffDelayMs(WIFI_RETRY_BASE_MS, wifiFailureCount, WIFI_RETRY_MAX_MS);
+        wifiFailureCount++;
+        nextWifiRetryMs = now + delayMs;
+        logLine("[WiFi] reconnect FAILED, retry in " + String(delayMs / 1000) + "s");
+    }
+}
+
+// NTP同期を1回試行する(Wi-Fi接続済みであることが前提)。
+bool syncNtpOnce() {
+    configTime(JST_OFFSET_SEC, JST_DST_OFFSET_SEC, NTP_SERVER1, NTP_SERVER2);
+    struct tm timeinfo;
+    bool ok = getLocalTime(&timeinfo, NTP_SYNC_TIMEOUT_MS);
+    logLine(ok ? "[NTP] sync OK" : "[NTP] sync FAILED");
+    return ok;
+}
+
 void checkNtpResync(uint32_t now) {
     if ((int32_t)(now - nextNtpSyncMs) < 0) return;
 
-    bool ok = wifiConnectAndSyncNtp();
+    if (!wifiConnected) {
+        // Wi-Fi未接続。ensureWifiConnected()の再接続を待ってから改めて試す。
+        nextNtpSyncMs = now + NTP_RETRY_BASE_MS;
+        return;
+    }
+
+    bool ok = syncNtpOnce();
     timeSynced = timeSynced || ok; // 一度同期できていれば、直近の再同期が失敗しても古い時刻情報を使い続ける
     if (ok) {
         ntpFailureCount = 0;
@@ -244,13 +313,12 @@ void runStartupConnectivityCheck() {
     } else {
         logLine("[Mist Plug] NOT REACHABLE - will retry during operation");
     }
-
-    nextSensorCheckMs = haveTempReading ? (millis() + TEMP_HUMIDITY_CHECK_INTERVAL_MS) : millis();
 #endif
 
     logLine("=== connectivity check done, starting automation ===");
 
     nextLightCheckMs = millis();
+    nextSensorCheckMs = millis();
 }
 
 #if 0
@@ -387,6 +455,41 @@ void checkLightSchedule(uint32_t now) {
     }
 }
 
+// =========================================================================
+// 7. 温湿度計測・レポート送信
+// =========================================================================
+
+// 温湿度計をBLEスキャンし、取得できた値を都度FastAPIバックエンドに送信する
+// (Wi-Fiは常時接続を前提とし、バッファは持たない)。スキャン/送信いずれかが
+// 失敗した場合は指数バックオフで再試行する。
+void checkMeterAndReport(uint32_t now) {
+    if ((int32_t)(now - nextSensorCheckMs) < 0) return;
+
+    float tempC = 0.0f;
+    uint8_t humidity = 0;
+    bool ok = false;
+    if (SwitchBotBLE::meterScanRead(METER_MAC, tempC, humidity)) {
+        logLine("[Meter] " + String(tempC, 1) + "C " + String(humidity) + "%");
+        if (wifiConnected) {
+            ok = sendMeterReadingHttp(tempC, humidity);
+        } else {
+            logLine("[Report] skipped (Wi-Fi not connected)");
+        }
+    } else {
+        logLine("[Meter] scan failed");
+    }
+
+    if (ok) {
+        meterFailureCount = 0;
+        nextSensorCheckMs = now + TEMP_HUMIDITY_CHECK_INTERVAL_MS;
+    } else {
+        uint32_t delayMs = backoffDelayMs(METER_RETRY_BASE_MS, meterFailureCount, METER_RETRY_MAX_MS);
+        meterFailureCount++;
+        nextSensorCheckMs = now + delayMs;
+        logLine("[Meter] retry in " + String(delayMs / 1000) + "s");
+    }
+}
+
 // BtnA押下時に、直近で同期した現在時刻をログに表示する。
 void showCurrentTime() {
     struct tm timeinfo;
@@ -416,8 +519,15 @@ void setup() {
     M5.Display.setCursor(0, 0);
     logLine("Reptile cage automation");
 
-    // Wi-FiとBLEの無線競合を避けるため、BLE初期化前に起動時のNTP同期を済ませる。
-    timeSynced = syncTimeWithRetry();
+    // Wi-Fiに接続し、以後は常時接続を維持する(切断しない)。
+    wifiConnected = connectWifiWithRetry();
+    if (wifiConnected) {
+        logLine("[WiFi] connected");
+        timeSynced = syncNtpOnce();
+    } else {
+        logLine("[WiFi] NOT CONNECTED - will keep retrying");
+    }
+
     uint32_t now = millis();
     nextNtpSyncMs = now + (timeSynced ? NTP_RESYNC_INTERVAL_MS : NTP_RETRY_BASE_MS);
     if (!timeSynced) {
@@ -434,8 +544,10 @@ void loop() {
     M5.update();
     uint32_t now = millis();
 
+    ensureWifiConnected(now);
     checkNtpResync(now);
     checkLightSchedule(now);
+    checkMeterAndReport(now);
     // checkTempHumidity(now); // ヒーター・ミストの判定。ライトのみ制御への切替に伴い無効化 (上記#if 0参照)
 
     if (M5.BtnA.wasPressed()) {

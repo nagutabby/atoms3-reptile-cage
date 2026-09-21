@@ -1,5 +1,7 @@
 #pragma once
 // このファイルを wifi_config.h にコピーし、実際の値を入力すること。
 // wifi_config.h は .gitignore 対象 (絶対にコミットしない)。
-#define WIFI_SSID     "your-ssid"
-#define WIFI_PASSWORD "your-password"
+#define WIFI_SSID          "your-ssid"
+#define WIFI_PASSWORD      "your-password"
+#define API_ENDPOINT_URL   "https://your-backend.onrender.com/api/readings"
+#define API_KEY            "your-api-key" // reptile-monitor/backend/.env の API_KEY と同じ値にする
