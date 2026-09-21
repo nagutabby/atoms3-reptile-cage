@@ -540,6 +540,7 @@ void setup() {
     M5.Display.setRotation(1);
     M5.Display.setTextSize(1);
     M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
+    M5.Display.setTextScroll(true); // 画面下端に達したら自動スクロールする(画面外への描画を防ぐ)
 
     Serial.begin(115200);
     delay(1000);
