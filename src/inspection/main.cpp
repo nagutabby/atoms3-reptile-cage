@@ -1,12 +1,13 @@
-// ニシアフリカトカゲモドキ スマートケージ - 点検用ファームウェア
+// ヒョウモントカゲモドキ スマートケージ - 点検用ファームウェア
 //
 // 本番の自動制御ファームウェア (src/automation/main.cpp) とは別の、配線・機器の
 // 疎通確認だけを行うためのスケッチ。以下を起動時に自動実行する(AtomS3のボタン
 // 操作は不要):
-//   - 防水温湿度計のパッシブスキャン
-//   - UVBプラグ / ヒーター用プラグ / ミスト用プラグそれぞれの ON/OFF 切り替え
-//     (ミスト用プラグは電源ONで自動的に噴射が始まる機器のため、本番と同じ
-//     10秒待機してからOFFにする挙動をそのまま検証する)
+//   - UVBプラグの ON/OFF 切り替え
+//
+// 温湿度計・ヒーター用プラグ・ミスト用プラグの点検は、本番がライトのみ制御に
+// 切り替わったことに伴い無効化 (#if 0) して残している。将来再度有効化する場合は
+// その節を参照。
 //
 // switchbot_ble.h/.cpp のリトライ(3回・Public/Randomアドレスタイプ交互)は
 // そのまま活きるため、ここでは追加のリトライ制御は行わない。
@@ -18,9 +19,12 @@
 // =========================================================================
 // 各機器のMACアドレス設定 (小文字・コロン区切り) - automation/main.cpp と同じ
 // =========================================================================
+const char* PLUG_UVB_MAC    = "70:af:09:17:2a:d2"; // UVBライト用プラグ
+
+#if 0
+// ライトのみ点検への切替に伴い無効化。復活させる場合はこの節を有効化する。
 const char* METER_MAC       = "eb:6b:03:06:2f:57"; // 防水温湿度計
 const char* PLUG_HEATER_MAC = "ac:27:6e:40:5a:a2"; // パネルヒーター用プラグ
-const char* PLUG_UVB_MAC    = "70:af:09:17:2a:d2"; // UVBライト用プラグ
 const char* PLUG_MIST_MAC   = "00:00:00:00:00:00"; // TODO: ミストシステム用プラグミニ。実機到着後に実際のMACアドレスに置き換える
 
 // ミスト継続時間は本番と同じ値にしておく(点検内容が本番と乖離しないように)。
@@ -29,6 +33,7 @@ const char* PLUG_MIST_MAC   = "00:00:00:00:00:00"; // TODO: ミストシステ�
 static const uint32_t MIST_WARMUP_MS         = 5UL * 1000;
 static const uint32_t MIST_SPRAY_DURATION_MS = 10UL * 1000;
 static const uint32_t MIST_TOTAL_ON_MS       = MIST_WARMUP_MS + MIST_SPRAY_DURATION_MS;
+#endif
 
 namespace {
 
@@ -37,6 +42,8 @@ void logLine(const String& msg) {
     M5.Display.println(msg);
 }
 
+#if 0
+// ライトのみ点検への切替に伴い無効化。復活させる場合はこの節を有効化する。
 void checkMeter() {
     logLine("[Meter] scanning...");
     float tempC = 0;
@@ -47,6 +54,7 @@ void checkMeter() {
         logLine("[Meter] NOT FOUND (scan timeout)");
     }
 }
+#endif
 
 // プラグミニの状態読み取り→ON→OFFを行い、応答が期待通りか確認する。
 void checkPlug(const char* name, const char* mac) {
@@ -75,7 +83,9 @@ void checkPlug(const char* name, const char* mac) {
     }
 }
 
-// 本番と同じミスト挙動を検証する: 電源ON(自動で噴射開始) → 待機 → 電源OFF。
+#if 0
+// ライトのみ点検への切替に伴い無効化。復活させる場合はこの節を有効化する。
+// 本番と同じミスト挙動を検証する: 電源ON(自動で噴射開始) -> 待機 -> 電源OFF。
 void checkMistPlug() {
     logLine("[Mist Plug] read state...");
     bool isOn = false;
@@ -103,16 +113,17 @@ void checkMistPlug() {
         logLine("[Mist Plug] OFF FAILED (spray auto-stops by itself, but power stays on)");
     }
 }
+#endif
 
 void runFullCheck() {
     M5.Display.clear();
     M5.Display.setCursor(0, 0);
     logLine("=== inspection check start ===");
 
-    checkMeter();
     checkPlug("UVB Plug", PLUG_UVB_MAC);
-    checkPlug("Heater Plug", PLUG_HEATER_MAC);
-    checkMistPlug();
+    // checkMeter(); // ライトのみ点検への切替に伴い無効化 (上記#if 0参照)
+    // checkPlug("Heater Plug", PLUG_HEATER_MAC); // 同上
+    // checkMistPlug(); // 同上
 
     logLine("=== inspection check done ===");
     logLine("Press BtnA to run again");
