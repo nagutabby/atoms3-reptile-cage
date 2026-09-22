@@ -93,7 +93,7 @@ static const uint32_t METER_RETRY_MAX_MS               = 15UL * 60 * 1000;    //
 // この温度を境に単純なON/OFF制御を行う(ヒステリシス無し。閾値付近で温度が細かく
 // 上下すると頻繁に切り替わりうるが、要件通りの単純な閾値制御とする)。
 // backend/app/config.py の TEMP_MAX_C と一致させること。
-static const float    TEMP_MAX_C                       = 30.0f;
+static const float    TEMP_MAX_C                       = 32.0f;
 
 // ---- 画面点灯 ----
 // 書き込み直後(起動時)またはBtnA押下時のみ5秒間点灯し、以後は消灯する。
