@@ -4,6 +4,10 @@
 // M5Stack AtomS3 から以下を自律制御する:
 //   - SwitchBot プラグミニ (UVBライト用, BLE): 実時刻(JST)に基づき
 //     7:00-18:59 ON / 19:00-6:59 OFF を切り替える (タイマー制御)
+//   - SwitchBot プラグミニ (パネルヒーター用, BLE): 温湿度チェックと同じ1分おきに、
+//     直近の温度がTEMP_MAX_Cを超えていればOFF、下回っていればONにする(単純な閾値制御、
+//     ヒステリシス無し)。既に同じ状態ならBLEコマンドは送らない(ライト制御と同様)。
+//     状態が変化していれば都度バックエンドに報告する
 //   - SwitchBot 防水温湿度計 (BLEパッシブスキャン): 1分おきに温湿度を取得し、
 //     取得できたら都度Wi-Fi経由でFastAPIバックエンドに送信する
 //     (本体内のデータ記録自体が1分単位のため、この間隔に合わせている)
@@ -30,6 +34,7 @@
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <time.h>
+#include "control_logic.h"
 #include "switchbot_ble.h"
 #include "wifi_config.h" // WIFI_SSID, WIFI_PASSWORD, API_ENDPOINT_URL, API_KEY (.gitignore対象。wifi_config.h.exampleを参照)
 
@@ -38,10 +43,10 @@
 // =========================================================================
 const char* PLUG_UVB_MAC    = "70:af:09:17:2a:d2"; // UVBライト用プラグ
 const char* METER_MAC       = "eb:6b:03:06:2f:57"; // 防水温湿度計
+const char* PLUG_HEATER_MAC = "ac:27:6e:40:5a:a2"; // パネルヒーター用プラグ
 
 #if 0
 // ライトのみ制御への切替に伴い無効化。復活させる場合はこの節を有効化する。
-const char* PLUG_HEATER_MAC = "ac:27:6e:40:5a:a2"; // パネルヒーター用プラグ
 const char* PLUG_MIST_MAC   = "00:00:00:00:00:00"; // TODO: ミストシステム用プラグミニ。実機到着後に実際のMACアドレスに置き換える
 #endif
 
@@ -83,6 +88,12 @@ static const uint32_t STARTUP_CHECK_RETRY_MAX_DELAY_MS  = 15000;     // ラウ�
 static const uint32_t TEMP_HUMIDITY_CHECK_INTERVAL_MS  = 1UL * 60 * 1000;     // 温湿度チェック間隔: 1分
 static const uint32_t METER_RETRY_BASE_MS              = 60UL * 1000;         // スキャン/送信失敗時の再試行間隔(指数バックオフの初期値): 1分
 static const uint32_t METER_RETRY_MAX_MS               = 15UL * 60 * 1000;    // 再試行間隔の上限: 15分
+
+// ---- ヒーター自動制御 ----
+// この温度を境に単純なON/OFF制御を行う(ヒステリシス無し。閾値付近で温度が細かく
+// 上下すると頻繁に切り替わりうるが、要件通りの単純な閾値制御とする)。
+// backend/app/config.py の TEMP_MAX_C と一致させること。
+static const float    TEMP_MAX_C                       = 30.0f;
 
 // ---- 画面点灯 ----
 // 書き込み直後(起動時)またはBtnA押下時のみ5秒間点灯し、以後は消灯する。
@@ -134,6 +145,15 @@ uint8_t lightRetryFailureCount = 0;
 uint32_t nextSensorCheckMs = 0;
 uint8_t meterFailureCount = 0;
 bool wifiConnected = false;
+
+bool heaterIsOn = false;
+
+// バックエンドに最後に報告した値。ライト・ヒーターとも、この値と実際の状態が
+// 異なる(または起動後まだ一度も報告していない)場合にだけ都度の送信対象に含める。
+bool lightReportKnown = false;
+bool lastReportedLightOn = false;
+bool heaterReportKnown = false;
+bool lastReportedHeaterOn = false;
 uint8_t wifiFailureCount = 0;
 uint32_t nextWifiRetryMs = 0;
 bool displayIsOn = false;
@@ -192,10 +212,12 @@ bool wifiConnect() {
     return WiFi.status() == WL_CONNECTED;
 }
 
-// 温湿度計測値をFastAPIバックエンドにレポート送信する(Wi-Fi接続済みであることが前提)。
+// 温湿度・ライト/ヒーター状態をFastAPIバックエンドにレポート送信する(Wi-Fi接続済みで
+// あることが前提)。ライト/ヒーターは値が変化した回だけ呼び出し側からhaveLight/haveHeater=
+// trueで渡され、その場合だけJSONにフィールドを含める(それ以外はDB側でNULLのままにする)。
 // 証明書検証は setInsecure() で省略している(組み込み機器でのCA証明書管理コストを
 // 避ける簡易実装。ホビー用途として許容し、MITMリスクは認識のうえ受容する)。
-bool sendMeterReadingHttp(float tempC, uint8_t humidity) {
+bool sendReadingHttp(float tempC, uint8_t humidity, bool haveLight, bool lightOn, bool haveHeater, bool heaterOn) {
     WiFiClientSecure client;
     client.setInsecure();
     HTTPClient http;
@@ -204,7 +226,8 @@ bool sendMeterReadingHttp(float tempC, uint8_t humidity) {
     if (http.begin(client, API_ENDPOINT_URL)) {
         http.addHeader("Content-Type", "application/json");
         http.addHeader("X-API-Key", API_KEY);
-        String body = String("{\"temp_c\":") + String(tempC, 1) + ",\"humidity\":" + String(humidity) + "}";
+        std::string bodyStd = ControlLogic::buildReadingRequestBody(tempC, humidity, haveLight, lightOn, haveHeater, heaterOn);
+        String body = String(bodyStd.c_str());
         int code = http.POST(body);
         ok = (code >= 200 && code < 300);
         logLine(ok ? "[Report] sent OK" : ("[Report] FAILED (HTTP " + String(code) + ")"));
@@ -317,6 +340,14 @@ void runStartupConnectivityCheck() {
         logLine(String("[UVB Plug] OK state=") + (uvbIsOn ? "ON" : "OFF"));
     } else {
         logLine("[UVB Plug] NOT REACHABLE - assuming OFF");
+    }
+
+    // ヒーターは自動制御しないため状態把握のみ。ここで読めなくても
+    // checkMeterAndReport() 側で毎分リトライされるため、失敗しても先に進む。
+    if (waitForPlugState("Heater Plug", PLUG_HEATER_MAC, heaterIsOn)) {
+        logLine(String("[Heater Plug] OK state=") + (heaterIsOn ? "ON" : "OFF"));
+    } else {
+        logLine("[Heater Plug] NOT REACHABLE - will keep retrying");
     }
 
 #if 0
@@ -455,10 +486,6 @@ void checkTempHumidity(uint32_t now) {
 // 6. ライトスケジュール判定本体
 // =========================================================================
 
-bool computeDesiredLightOn(const struct tm& t) {
-    return t.tm_hour >= LIGHT_ON_HOUR && t.tm_hour < LIGHT_OFF_HOUR;
-}
-
 void checkLightSchedule(uint32_t now) {
     if ((int32_t)(now - nextLightCheckMs) < 0) return;
 
@@ -469,7 +496,7 @@ void checkLightSchedule(uint32_t now) {
         return;
     }
 
-    bool wantOn = computeDesiredLightOn(timeinfo);
+    bool wantOn = ControlLogic::computeDesiredLightOn(timeinfo, LIGHT_ON_HOUR, LIGHT_OFF_HOUR);
     if (wantOn == uvbIsOn) {
         lightRetryFailureCount = 0;
         nextLightCheckMs = now + LIGHT_SCHEDULE_CHECK_INTERVAL_MS;
@@ -495,8 +522,9 @@ void checkLightSchedule(uint32_t now) {
 // =========================================================================
 
 // 温湿度計をBLEスキャンし、取得できた値を都度FastAPIバックエンドに送信する
-// (Wi-Fiは常時接続を前提とし、バッファは持たない)。スキャン/送信いずれかが
-// 失敗した場合は指数バックオフで再試行する。
+// (Wi-Fiは常時接続を前提とし、バッファは持たない)。同じタイミングでライト/ヒーターの
+// 現在状態も確認し、前回報告値から変化していればあわせて送信する。
+// スキャン/送信いずれかが失敗した場合は指数バックオフで再試行する。
 void checkMeterAndReport(uint32_t now) {
     if ((int32_t)(now - nextSensorCheckMs) < 0) return;
 
@@ -505,8 +533,36 @@ void checkMeterAndReport(uint32_t now) {
     bool ok = false;
     if (SwitchBotBLE::meterScanRead(METER_MAC, tempC, humidity)) {
         logLine("[Meter] " + String(tempC, 1) + "C " + String(humidity) + "%");
+
+        // 温度がTEMP_MAX_Cを超えたらOFF、下回ったらONにする。既に同じ状態ならBLEコマンドは
+        // 送らない(ライトのスケジュール制御と同じ考え方)。失敗した場合はheaterIsOnを更新
+        // しないため、次回このループが回った時に改めて同じ切替を試みる。
+        bool wantHeaterOn = ControlLogic::computeDesiredHeaterOn(tempC, TEMP_MAX_C);
+        if (wantHeaterOn != heaterIsOn) {
+            bool toggled = wantHeaterOn ? SwitchBotBLE::plugTurnOn(PLUG_HEATER_MAC) : SwitchBotBLE::plugTurnOff(PLUG_HEATER_MAC);
+            if (toggled) {
+                heaterIsOn = wantHeaterOn;
+                logLine(String("[Heater] toggled -> ") + (heaterIsOn ? "ON" : "OFF"));
+            } else {
+                logLine("[Heater] toggle FAILED");
+            }
+        }
+
+        bool haveLight = !lightReportKnown || uvbIsOn != lastReportedLightOn;
+        bool haveHeater = !heaterReportKnown || heaterIsOn != lastReportedHeaterOn;
+
         if (wifiConnected) {
-            ok = sendMeterReadingHttp(tempC, humidity);
+            ok = sendReadingHttp(tempC, humidity, haveLight, uvbIsOn, haveHeater, heaterIsOn);
+            if (ok) {
+                if (haveLight) {
+                    lastReportedLightOn = uvbIsOn;
+                    lightReportKnown = true;
+                }
+                if (haveHeater) {
+                    lastReportedHeaterOn = heaterIsOn;
+                    heaterReportKnown = true;
+                }
+            }
         } else {
             logLine("[Report] skipped (Wi-Fi not connected)");
         }
