@@ -33,6 +33,7 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
+#include <esp_netif.h>
 #include <time.h>
 #include "control_logic.h"
 #include "switchbot_ble.h"
@@ -59,6 +60,10 @@ static const long     JST_OFFSET_SEC                   = 9L * 3600; // JST (UTC+
 static const int      JST_DST_OFFSET_SEC                = 0;
 static const char*    NTP_SERVER1                       = "ntp.nict.jp";
 static const char*    NTP_SERVER2                       = "time.cloudflare.com";
+
+// ---- DNS (ルーターのDHCPが配布するDNSではなくCloudflareを使う) ----
+static const uint32_t DNS_PRIMARY   = ESP_IP4TOADDR(1, 1, 1, 1);
+static const uint32_t DNS_SECONDARY = ESP_IP4TOADDR(1, 0, 0, 1);
 
 static const uint32_t WIFI_CONNECT_TIMEOUT_MS           = 15UL * 1000;          // Wi-Fi接続タイムアウト: 15秒
 static const uint32_t NTP_SYNC_TIMEOUT_MS               = 10UL * 1000;          // NTP同期待ちタイムアウト: 10秒
@@ -200,6 +205,20 @@ bool mistIsOn = false;
 // 3. Wi-Fi + NTP 時刻同期
 // =========================================================================
 
+// IP/ゲートウェイ/サブネットはDHCP任せのまま、DNSだけ上書きする。
+// (WiFi.config()でDNSを指定するにはIPも静的指定する必要があり、DHCPと両立しないため)
+void overrideDns() {
+    esp_netif_t* netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (netif == nullptr) return;
+
+    esp_netif_dns_info_t dns;
+    dns.ip.type = ESP_IPADDR_TYPE_V4;
+    dns.ip.u_addr.ip4.addr = DNS_PRIMARY;
+    esp_netif_set_dns_info(netif, ESP_NETIF_DNS_MAIN, &dns);
+    dns.ip.u_addr.ip4.addr = DNS_SECONDARY;
+    esp_netif_set_dns_info(netif, ESP_NETIF_DNS_BACKUP, &dns);
+}
+
 // Wi-Fi接続を1回試行する。常時接続を維持する方針のため、呼び出し側で切断は行わない。
 bool wifiConnect() {
     WiFi.mode(WIFI_STA);
@@ -209,7 +228,9 @@ bool wifiConnect() {
     while (WiFi.status() != WL_CONNECTED && (millis() - start) < WIFI_CONNECT_TIMEOUT_MS) {
         delay(200);
     }
-    return WiFi.status() == WL_CONNECTED;
+    bool connected = WiFi.status() == WL_CONNECTED;
+    if (connected) overrideDns(); // DHCPのDNS配布より後に上書きする
+    return connected;
 }
 
 // 温湿度・ライト/ヒーター状態をFastAPIバックエンドにレポート送信する(Wi-Fi接続済みで
